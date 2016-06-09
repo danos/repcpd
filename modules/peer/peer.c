@@ -30,10 +30,10 @@ static bool request_handler(struct udp_sock *us, const struct sa *src,
 	peer = *(struct pcp_peer *)pcp_msg_payload(msg);
 	lifetime = msg->hdr.lifetime;
 	int_addr = msg->hdr.cli_addr;
-	sa_set_port(&int_addr, peer.int_port);
+	sa_set_port(&int_addr, peer.map.int_port);
 
 	/* Validate Remote Peer Address and Port */
-	if (!peer.proto ||
+	if (!peer.map.proto ||
 	    sa_is_loopback(&peer.remote_addr) ||
 	    sa_is_any(&peer.remote_addr)) {
 
@@ -41,7 +41,7 @@ static bool request_handler(struct udp_sock *us, const struct sa *src,
 		goto error;
 	}
 
-	mapping = mapping_find_peer(table, peer.proto, &int_addr,
+	mapping = mapping_find_peer(table, peer.map.proto, &int_addr,
 				    &peer.remote_addr);
 
 	if (mapping) {
@@ -50,12 +50,12 @@ static bool request_handler(struct udp_sock *us, const struct sa *src,
 
 	if (!mapping) {
 
-		if (!sa_isset(&peer.ext_addr, SA_ALL) ||
-		    repcpd_extaddr_exist(&peer.ext_addr)) {
+		if (!sa_isset(&peer.map.ext_addr, SA_ALL) ||
+		    repcpd_extaddr_exist(&peer.map.ext_addr)) {
 
-			if (!sa_isset(&peer.ext_addr, SA_ALL)) {
+			if (!sa_isset(&peer.map.ext_addr, SA_ALL)) {
 
-				err = repcpd_extaddr_assign(&peer.ext_addr,
+				err = repcpd_extaddr_assign(&peer.map.ext_addr,
 							    sa_port(&int_addr),
 							    sa_af(src));
 				if (err) {
@@ -67,10 +67,10 @@ static bool request_handler(struct udp_sock *us, const struct sa *src,
 			}
 
 			err = mapping_create(&mapping, table, PCP_PEER,
-					     peer.proto, &int_addr,
-					     &peer.ext_addr,
+					     peer.map.proto, &int_addr,
+					     &peer.map.ext_addr,
 					     &peer.remote_addr,
-					     lifetime, peer.nonce, NULL);
+					     lifetime, peer.map.nonce, NULL);
 			if (err) {
 				warning("peer: failed to create mapping"
 					       " (%m)\n", err);
@@ -91,7 +91,7 @@ static bool request_handler(struct udp_sock *us, const struct sa *src,
 
 	/* simple threat model */
 	if (mapping) {
-		if (0 != memcmp(peer.nonce, mapping->map.nonce,
+		if (0 != memcmp(peer.map.nonce, mapping->map.nonce,
 				PCP_NONCE_SZ)) {
 			result = PCP_NOT_AUTHORIZED;
 			goto error;
@@ -101,7 +101,7 @@ static bool request_handler(struct udp_sock *us, const struct sa *src,
  out:
 	if (mapping) {
 		info("peer: SUCCESS -- Suggested=%J, Assigned=%J\n",
-		     &msg->pld.peer.ext_addr, &peer.ext_addr);
+		     &msg->pld.peer.map.ext_addr, &peer.map.ext_addr);
 	}
 
 	if (mapping) {
