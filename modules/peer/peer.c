@@ -50,6 +50,8 @@ static bool request_handler(struct udp_sock *us, const struct sa *src,
 
 	if (!mapping) {
 
+		const char *ext_ifname = NULL;
+
 		if (!sa_isset(&peer.map.ext_addr, SA_ALL) ||
 		    repcpd_extaddr_exist(&peer.map.ext_addr)) {
 
@@ -66,8 +68,17 @@ static bool request_handler(struct udp_sock *us, const struct sa *src,
 				}
 			}
 
+			/* Check the external Interface note:
+			   af is suggested AF -- AF_UNSPEC means any */
+			ext_ifname = repcpd_extaddr_ifname_find(AF_UNSPEC);
+			if (!ext_ifname) {
+				warning("peer: external interface"
+					" not found\n");
+			}
+
 			err = mapping_create(&mapping, table, PCP_PEER,
 					     peer.map.proto, &int_addr,
+					     ext_ifname,
 					     &peer.map.ext_addr,
 					     &peer.remote_addr,
 					     lifetime, peer.map.nonce, NULL);

@@ -12,6 +12,7 @@
 struct extaddr {
 	struct le le;
 	struct sa addr;
+	char *ifname;
 };
 
 
@@ -22,6 +23,8 @@ static void destructor(void *arg)
 {
 	struct extaddr *ea = arg;
 
+	mem_deref(ea->ifname);
+
 	list_unlink(&ea->le);
 }
 
@@ -29,18 +32,28 @@ static void destructor(void *arg)
 static int extaddr_add(const char *ifname, const struct sa *addr)
 {
 	struct extaddr *ea;
+	int err;
 
 	ea = mem_zalloc(sizeof(*ea), destructor);
 	if (!ea)
 		return ENOMEM;
 
 	ea->addr = *addr;
+
+	err = str_dup(&ea->ifname, ifname);
+	if (err)
+		goto out;
+
 	list_append(&extaddrl, &ea->le, ea);
 
 	debug("added external interface: %s with IP-address %j\n",
 	      ifname, &ea->addr);
 
-	return 0;
+ out:
+	if (err)
+		mem_deref(ea);
+
+	return err;
 }
 
 
@@ -129,6 +142,24 @@ int repcpd_extaddr_assign(struct sa *ext_addr, uint16_t int_port, int af)
 	sa_set_port(ext_addr, int_port);
 
 	return 0;
+}
+
+
+char *repcpd_extaddr_ifname_find(int af)
+{
+	struct le *le;
+
+	for (le = extaddrl.head; le; le = le->next) {
+
+		struct extaddr *ea = le->data;
+
+		if (af != AF_UNSPEC && af != sa_af(&ea->addr))
+			continue;
+
+		return ea->ifname;
+	}
+
+	return NULL;
 }
 
 

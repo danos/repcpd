@@ -71,28 +71,29 @@ static void backend_flush(const char *name)
 
 
 static int backend_append(const char *name, int proto,
-			  const struct sa *ext_addr,
+			  const struct sa *ext_addr, const char *ext_ifname,
 			  const struct sa *int_addr,
 			  const char *descr)
 {
-	return iptables_cmd("iptables -t nat -A %s -p %s --dport %u"
+
+	return iptables_cmd("iptables -t nat -A %s -p %s -i %s --dport %u"
 			    " -j DNAT --to %J"
 			    "%H",
-			    name, pcp_proto_name(proto),
+			    name, pcp_proto_name(proto), ext_ifname,
 			    sa_port(ext_addr), int_addr,
 			    print_comment, descr);
 }
 
 
 static void backend_delete(const char *name, int proto,
-			   const struct sa *ext_addr,
+			   const struct sa *ext_addr, const char *ext_ifname,
 			   const struct sa *int_addr,
 			   const char *descr)
 {
-	iptables_cmd("iptables -t nat -D %s -p %s --dport %u"
+	iptables_cmd("iptables -t nat -D %s -p %s -i %s --dport %u"
 		     " -j DNAT --to %J"
 		     "%H",
-		     name, pcp_proto_name(proto),
+		     name, pcp_proto_name(proto), ext_ifname,
 		     sa_port(ext_addr), int_addr,
 		     print_comment, descr);
 }
@@ -100,18 +101,19 @@ static void backend_delete(const char *name, int proto,
 
 static int backend_append_snat(const char *name, int proto,
 			       const struct sa *ext_addr,
+			       const char *ext_ifname,
 			       const struct sa *int_addr,
 			       const struct sa *remote_addr,
 			       const char *descr)
 {
 	/* --to is what it should be re-written _TO_ */
 
-	return iptables_cmd("iptables -t nat -A %s -p %s"
+	return iptables_cmd("iptables -t nat -A %s -p %s -i %s"
 			    " --source %j --sport %u"
 			    " --dst %j --dport %u"
 			    " -j SNAT --to %J"
 			    "%H",
-			    name, pcp_proto_name(proto),
+			    name, pcp_proto_name(proto), ext_ifname,
 			    int_addr, sa_port(int_addr),
 			    remote_addr, sa_port(remote_addr),
 			    ext_addr,
@@ -121,16 +123,17 @@ static int backend_append_snat(const char *name, int proto,
 
 static void backend_delete_snat(const char *name, int proto,
 				const struct sa *ext_addr,
+				const char *ext_ifname,
 				const struct sa *int_addr,
 				const struct sa *peer_addr,
 				const char *descr)
 {
-	iptables_cmd("iptables -t nat -D %s -p %s"
+	iptables_cmd("iptables -t nat -D %s -p %s -i %s"
 		     " --source %j --sport %u"
 		     " --dst %j --dport %u"
 		     " -j SNAT --to %J"
 		     "%H",
-		     name, pcp_proto_name(proto),
+		     name, pcp_proto_name(proto), ext_ifname,
 		     int_addr, sa_port(int_addr),
 		     peer_addr, sa_port(peer_addr),
 		     ext_addr,

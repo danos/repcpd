@@ -32,6 +32,7 @@ static void mapping_destructor(void *arg)
 			mapping->table->be->delete(mapping->table->name,
 						   mapping->map.proto,
 						   &mapping->map.ext_addr,
+						   mapping->ext_ifname,
 						   &mapping->int_addr,
 						   mapping->descr);
 			break;
@@ -40,6 +41,7 @@ static void mapping_destructor(void *arg)
 			mapping->table->be->delete_snat(mapping->table->name,
 							mapping->map.proto,
 							&mapping->map.ext_addr,
+						        mapping->ext_ifname,
 							&mapping->int_addr,
 							&mapping->remote_addr,
 							mapping->descr);
@@ -55,6 +57,7 @@ static void mapping_destructor(void *arg)
 	}
 
 	mem_deref(mapping->descr);
+	mem_deref(mapping->ext_ifname);
 }
 
 
@@ -87,8 +90,8 @@ static uint32_t key(int proto, const struct sa *int_addr,
 int mapping_create(struct mapping **mappingp, struct mapping_table *table,
 		   enum pcp_opcode opcode,
 		   int proto,
-		   const struct sa *int_addr, const struct sa *ext_addr,
-		   const struct sa *remote_addr,
+		   const struct sa *int_addr, const char *ext_ifname,
+		   const struct sa *ext_addr, const struct sa *remote_addr,
 		   uint32_t lifetime, const uint8_t nonce[12],
 		   const char *descr)
 {
@@ -114,6 +117,10 @@ int mapping_create(struct mapping **mappingp, struct mapping_table *table,
 	mapping->int_addr = *int_addr;
 	mapping->lifetime = lifetime;
 
+	err = str_dup(&mapping->ext_ifname, ext_ifname);
+	if (err)
+		goto out;
+
 	if (descr) {
 		err = str_dup(&mapping->descr, descr);
 		if (err)
@@ -123,13 +130,14 @@ int mapping_create(struct mapping **mappingp, struct mapping_table *table,
 	switch (opcode) {
 
 	case PCP_MAP:
-		err = table->be->append(table->name, proto, ext_addr, int_addr,
+		err = table->be->append(table->name, proto, ext_addr,
+					ext_ifname, int_addr,
 					descr);
 		break;
 
 	case PCP_PEER:
 		err = table->be->append_snat(table->name, proto,
-					     ext_addr, int_addr,
+					     ext_addr, ext_ifname, int_addr,
 					     remote_addr, descr);
 		break;
 

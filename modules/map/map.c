@@ -76,12 +76,21 @@ static bool request_handler(struct udp_sock *us, const struct sa *src,
 
 		if (!mapping) {
 			struct pcp_option *opt;
+			const char *ext_ifname;
+
+			/* Check the external Interface
+			 * note: af is suggested AF -- AF_UNSPEC means any */
+			ext_ifname = repcpd_extaddr_ifname_find(AF_UNSPEC);
+			if (!ext_ifname) {
+				warning("map: external interface not found\n");
+			}
 
 			opt = pcp_msg_option(msg, PCP_OPTION_DESCRIPTION);
 
 			err = mapping_create(&mapping, table, PCP_MAP,
 					     map->proto,
 					     &msg->hdr.cli_addr,
+					     ext_ifname,
 					     &map->ext_addr, NULL,
 					     msg->hdr.lifetime, map->nonce,
 					     opt ? opt->u.description : NULL);

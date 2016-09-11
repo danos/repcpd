@@ -53,6 +53,7 @@ struct mapping {
 	enum pcp_opcode opcode;
 	struct sa int_addr;  /* ADDR-part and PORT from 'map' (duplicated) */
 	struct pcp_map map;
+	char *ext_ifname;    /* External Interface */
 
 	/* extra for PEER: */
 	struct sa remote_addr;
@@ -67,7 +68,8 @@ struct mapping {
 int  mapping_create(struct mapping **mappingp, struct mapping_table *table,
 		    enum pcp_opcode opcode,
 		    int proto,
-		    const struct sa *int_addr, const struct sa *ext_addr,
+		    const struct sa *int_addr, const char *ext_ifname,
+		    const struct sa *ext_addr,
 		    const struct sa *remote_addr,
 		    uint32_t lifetime, const uint8_t nonce[12],
 		    const char *descr);
@@ -120,6 +122,7 @@ int  repcpd_extaddr_init(void);
 void repcpd_extaddr_close(void);
 bool repcpd_extaddr_exist(const struct sa *addr);
 int  repcpd_extaddr_assign(struct sa *ext_addr, uint16_t int_port, int af);
+char *repcpd_extaddr_ifname_find(int af);
 struct sa *repcpd_extaddr_find(int af);
 
 
@@ -131,19 +134,23 @@ typedef int  (backend_new_h)(const char *name);
 typedef void (backend_flush_h)(const char *name);
 typedef int  (backend_append_dnat_h)(const char *name, int proto,
 				     const struct sa *ext_addr,
+				     const char *ext_ifname,
 				     const struct sa *int_addr,
 				     const char *descr);
 typedef void (backend_delete_dnat_h)(const char *name, int proto,
 				     const struct sa *ext_addr,
+				     const char *ext_ifname,
 				     const struct sa *int_addr,
 				     const char *descr);
 typedef int  (backend_append_snat_h)(const char *name, int proto,
 				     const struct sa *ext_addr,
+				     const char *ext_ifname,
 				     const struct sa *int_addr,
 				     const struct sa *peer_addr,
 				     const char *descr);
 typedef void (backend_delete_snat_h)(const char *name, int proto,
 				     const struct sa *ext_addr,
+				     const char *ext_ifname,
 				     const struct sa *int_addr,
 				     const struct sa *peer_addr,
 				     const char *descr);
