@@ -181,3 +181,5 @@ struct backend *backend_get(void);
 struct conf *_conf(void);
 uint32_t repcpd_epoch_time(void);
 int conf_get_sa(const struct conf *conf, const char *name, struct sa *sa);
+int conf_get_range(const struct conf *conf, const char *name,
+		   uint32_t *min_value, uint32_t *max_value);

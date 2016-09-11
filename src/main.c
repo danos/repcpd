@@ -150,6 +150,10 @@ int main(int argc, char *argv[])
 
 	(void)time(&start_time);
 
+	err = repcpd_init(conf);
+	if (err)
+		goto out;
+
 	/* udp */
 	err = repcpd_udp_init();
 	if (err)

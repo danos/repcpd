@@ -11,6 +11,7 @@ void repcpd_udp_close(void);
 
 
 /* pcp */
+int  repcpd_init(const struct conf *conf);
 void repcpd_process_msg(struct udp_sock *us,
 			const struct sa *src, const struct sa *dst,
 			struct mbuf *mb);

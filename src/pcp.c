@@ -12,7 +12,12 @@
 
 static struct {
 	struct list pcpl;
-} pcpx;
+	uint32_t lifetime_min;
+	uint32_t lifetime_max;
+} pcpx = {
+	.lifetime_min = LIFETIME_MIN,
+	.lifetime_max = LIFETIME_MAX,
+};
 
 
 void repcpd_process_msg(struct udp_sock *us, const struct sa *src,
@@ -161,10 +166,37 @@ bool pcp_nonce_cmp(const struct pcp_msg *msg,
 
 uint32_t pcp_lifetime_calculate(uint32_t lifetime)
 {
-	if (lifetime < LIFETIME_MIN)
-		return LIFETIME_MIN;
-	if (lifetime > LIFETIME_MAX)
-		return LIFETIME_MAX;
+	if (lifetime < pcpx.lifetime_min)
+		return pcpx.lifetime_min;
+
+	if (lifetime > pcpx.lifetime_max)
+		return pcpx.lifetime_max;
 
 	return lifetime;
+}
+
+
+int repcpd_init(const struct conf *conf)
+{
+	int err;
+
+	if (!conf)
+		return EINVAL;
+
+	err = conf_get_range(conf, "lifetime",
+			     &pcpx.lifetime_min, &pcpx.lifetime_max);
+	if (err) {
+		warning("pcp: error parsing `lifetime' config (%m)\n", err);
+		return err;
+	}
+
+	if (!pcpx.lifetime_min || !pcpx.lifetime_max) {
+		warning("pcp: illegal lifetime values\n");
+		return EINVAL;
+	}
+
+	info("pcp: mapping lifetime is %u-%u seconds\n",
+	     pcpx.lifetime_min, pcpx.lifetime_max);
+
+	return 0;
 }
