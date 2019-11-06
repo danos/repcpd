@@ -1,0 +1,34 @@
+From: George Wilkie <george.wilkie@intl.att.com>
+Date: Fri, 19 Jul 2019 12:43:10 +0100
+Subject: Set UDP sockets to receive packet info
+
+---
+ src/udp.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/udp.c b/src/udp.c
+index 154858a..858d602 100644
+--- a/src/udp.c
++++ b/src/udp.c
+@@ -96,6 +96,9 @@ static void udp_retry(void *arg)
+ 		tmr_start(&ul->retry, UDP_RETRY_TIMEOUT, udp_retry, ul);
+ 	} else {
+ 		info("udp listen succeeded on retry: %J\n", &ul->bnd_addr);
++		err = udp_set_pktinfo(ul->us, sa_af(&ul->bnd_addr));
++		if (err)
++			warning("udp pktinfo %J: %m\n", &ul->bnd_addr, err);
+ 		list_apply(&ul->applyl, true, udp_apply, ul);
+ 	}
+ }
+@@ -133,6 +136,11 @@ static int listen_handler(const struct pl *addrport, void *arg)
+ 
+ 	debug("udp listen: %J\n", &ul->bnd_addr);
+ 
++	err = udp_set_pktinfo(ul->us, sa_af(&ul->bnd_addr));
++	if (err) {
++		warning("udp pktinfo %J: %m\n", &ul->bnd_addr, err);
++		err = 0;
++	}
+ 	list_apply(&ul->applyl, true, udp_apply, ul);
+ 
+  out:

@@ -1,0 +1,107 @@
+From: George Wilkie <george.wilkie@intl.att.com>
+Date: Fri, 19 Jul 2019 12:07:00 +0100
+Subject: Defer UDP apply requests for unbound sockets
+
+Invoke the handlers when/if sockets bind successfully.
+This is to handle the case when PCP daemon runs before interface
+address configuration is applied.
+---
+ src/udp.c | 52 +++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/src/udp.c b/src/udp.c
+index d72a61e..154858a 100644
+--- a/src/udp.c
++++ b/src/udp.c
+@@ -17,12 +17,55 @@ struct udp_lstnr {
+ 	struct sa bnd_addr;
+ 	struct udp_sock *us;
+ 	struct tmr retry;
++	struct list applyl;
+ };
+ 
+ 
+ static struct list lstnrl;
+ 
+ 
++struct udp_apply {
++	struct le le;
++	repcpd_udp_apply_h *h;
++	void *arg;
++};
++
++
++static bool udp_apply(struct le *le, void *arg)
++{
++	const struct udp_apply *ap = le->data;
++	struct udp_lstnr *ul = arg;
++
++	ap->h(&ul->bnd_addr, ul->us, ap->arg);
++	return 0;
++}
++
++
++static void udp_apply_destructor(void *arg)
++{
++	struct udp_apply *ap = arg;
++
++	list_unlink(&ap->le);
++}
++
++
++static void udp_apply_register(struct udp_lstnr *ul, repcpd_udp_apply_h *h,
++			       void *arg)
++{
++	struct udp_apply *ap;
++
++	ap = mem_zalloc(sizeof(*ap), udp_apply_destructor);
++	if (!ap) {
++		warning("udp apply memory failure\n");
++		return;
++	}
++
++	ap->h = h;
++	ap->arg = arg;
++	list_append(&ul->applyl, &ap->le, ap);
++}
++
++
+ static void udp_recv(const struct sa *src, struct mbuf *mb, void *arg)
+ {
+ 	struct udp_lstnr *ul = arg;
+@@ -36,6 +79,7 @@ static void destructor(void *arg)
+ 	struct udp_lstnr *ul = arg;
+ 
+ 	tmr_cancel(&ul->retry);
++	list_flush(&ul->applyl);
+ 	list_unlink(&ul->le);
+ 	mem_deref(ul->us);
+ }
+@@ -52,6 +96,7 @@ static void udp_retry(void *arg)
+ 		tmr_start(&ul->retry, UDP_RETRY_TIMEOUT, udp_retry, ul);
+ 	} else {
+ 		info("udp listen succeeded on retry: %J\n", &ul->bnd_addr);
++		list_apply(&ul->applyl, true, udp_apply, ul);
+ 	}
+ }
+ 
+@@ -88,6 +133,8 @@ static int listen_handler(const struct pl *addrport, void *arg)
+ 
+ 	debug("udp listen: %J\n", &ul->bnd_addr);
+ 
++	list_apply(&ul->applyl, true, udp_apply, ul);
++
+  out:
+ 	if (err)
+ 		mem_deref(ul);
+@@ -130,6 +177,9 @@ void repcpd_udp_apply(repcpd_udp_apply_h *h, void *arg)
+ 	for (le = lstnrl.head; le; le = le->next) {
+ 		struct udp_lstnr *ul = le->data;
+ 
+-		h(&ul->bnd_addr, ul->us, arg);
++		if (ul->us)
++			h(&ul->bnd_addr, ul->us, arg);
++		else
++			udp_apply_register(ul, h, arg);
+ 	}
+ }

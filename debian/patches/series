@@ -1,0 +1,7 @@
+Makefile-changes-to-get-it-building-against-libre.patch
+Retry-udp-listen-on-failure.patch
+Defer-UDP-apply-requests-for-unbound-sockets.patch
+Add-unicast-announce-capability.patch
+Add-configuration-to-enable-multicast-announce.patch
+Set-UDP-sockets-to-receive-packet-info.patch
+Add-vyatta-module-to-replace-map-peer-and-backend.patch

@@ -1,0 +1,120 @@
+From: George Wilkie <george.wilkie@intl.att.com>
+Date: Fri, 19 Jul 2019 12:09:19 +0100
+Subject: Add unicast announce capability
+
+Allow configuration of multiple client unicast addresses/ports.
+Send ANNOUNCE response to each when UDP listen succeeds.
+---
+ modules/announce/announce.c | 79 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 79 insertions(+)
+
+diff --git a/modules/announce/announce.c b/modules/announce/announce.c
+index 87b9672..dc2f861 100644
+--- a/modules/announce/announce.c
++++ b/modules/announce/announce.c
+@@ -8,6 +8,77 @@
+ #include <repcpd.h>
+ 
+ 
++struct announce_unicast {
++	struct le le;
++	struct sa client;
++};
++
++
++struct announce_apply {
++	struct sa *bnd_addr;
++	struct udp_sock *us;
++};
++
++
++static struct list announcel;
++
++
++static void destructor(void *arg)
++{
++	struct announce_unicast *at = arg;
++
++	list_unlink(&at->le);
++}
++
++
++static int announce_handler(const struct pl *pl, void *arg)
++{
++	struct announce_unicast *at;
++	int err;
++
++	at = mem_zalloc(sizeof(*at), destructor);
++	if (!at)
++		return ENOMEM;
++
++	err = sa_decode(&at->client, pl->p, pl->l);
++	if (err) {
++		warning("bad announce to address: %r\n", pl);
++		goto out;
++	}
++
++	list_append(&announcel, &at->le, at);
++
++ out:
++	if (err)
++		mem_deref(at);
++
++	return err;
++}
++
++
++static bool announce_apply(struct le *le, void *arg)
++{
++	const struct announce_unicast *at = le->data;
++	struct announce_apply *aa = arg;
++	int err;
++
++	if (sa_af(aa->bnd_addr) != sa_af(&at->client))
++		return false;
++
++	err = pcp_reply(aa->us, &at->client, NULL, PCP_ANNOUNCE, PCP_SUCCESS,
++			0, repcpd_epoch_time(), NULL);
++	if (err) {
++		warning("announce: failed to send ANNOUNCE from %J to %J (%m)",
++			aa->bnd_addr, &at->client, err);
++	} else {
++		info("announce: sent ANNOUNCE from %J to %J\n",
++		     aa->bnd_addr, &at->client);
++	}
++
++	return false;
++}
++
++
+ static bool request_handler(struct udp_sock *us, const struct sa *src,
+ 			    struct mbuf *mb, struct pcp_msg *msg)
+ {
+@@ -45,12 +116,18 @@ static struct repcpd_pcp announce = {
+ static void lstnr_handler(struct sa *bnd_addr, struct udp_sock *us,
+ 			  void *arg)
+ {
++	struct announce_apply aa;
+ 	const char *maddr;
+ 	struct sa dst;
+ 	int err;
+ 
+ 	(void)arg;
+ 
++	/* unicast responses */
++	aa.bnd_addr = bnd_addr;
++	aa.us = us;
++	list_apply(&announcel, true, announce_apply, &aa);
++
+ 	switch (sa_af(bnd_addr)) {
+ 
+ 	case AF_INET:
+@@ -83,6 +160,8 @@ static int module_init(void)
+ {
+ 	repcpd_register_handler(&announce);
+ 
++	conf_apply(_conf(), "announce_unicast", announce_handler, 0);
++
+ 	debug("announce: module loaded\n");
+ 
+ 	repcpd_udp_apply(lstnr_handler, NULL);

@@ -1,0 +1,26 @@
+Source: repcpd
+Section: net
+Priority: optional
+Maintainer: Vyatta Package Maintainers <DL-vyatta-help@att.com>
+Build-Depends:
+ debhelper (>= 10),
+ libbsd-dev,
+ libczmq-dev,
+ libjson-c-dev,
+ libre-dev,
+ libvplaned-dev,
+ pkg-config
+Standards-Version: 4.3.0
+
+Package: repcpd
+Architecture: linux-any
+Pre-Depends:
+ ${misc:Pre-Depends},
+Depends:
+ debconf,
+ ${misc:Depends},
+ ${shlibs:Depends},
+Description: Port Control Protocol (PCP) Server
+ A Port Control Protocol (PCP) Server based on libre - a Generic library
+ for real-time communications with async IO support.
+ Implements RFC-6887

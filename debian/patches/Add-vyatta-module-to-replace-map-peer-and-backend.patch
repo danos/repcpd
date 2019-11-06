@@ -1,0 +1,966 @@
+From: George Wilkie <george.wilkie@intl.att.com>
+Date: Tue, 9 Jul 2019 15:03:24 +0100
+Subject: Add vyatta module to replace map/peer and backend
+
+Communicates with vplaned/dataplane to program mappings.
+Remove build of existing modules which are not required.
+---
+ Makefile                   |   6 +-
+ modules/vyatta/backend.c   |  52 +++++
+ modules/vyatta/dataplane.c | 296 +++++++++++++++++++++++++
+ modules/vyatta/module.mk   |  11 +
+ modules/vyatta/vyatta.c    | 522 +++++++++++++++++++++++++++++++++++++++++++++
+ modules/vyatta/vyatta.h    |  16 ++
+ 6 files changed, 898 insertions(+), 5 deletions(-)
+ create mode 100644 modules/vyatta/backend.c
+ create mode 100644 modules/vyatta/dataplane.c
+ create mode 100644 modules/vyatta/module.mk
+ create mode 100644 modules/vyatta/vyatta.c
+ create mode 100644 modules/vyatta/vyatta.h
+
+diff --git a/Makefile b/Makefile
+index 6b3bf59..9786d76 100644
+--- a/Makefile
++++ b/Makefile
+@@ -13,13 +13,9 @@ VERSION   := $(VER_MAJOR).$(VER_MINOR).$(VER_PATCH)
+ 
+ # PCP modules
+ MODULES	  := announce
+-MODULES   += map
+-MODULES   += peer
+-
+-MODULES   += proxy
++MODULES   += vyatta
+ 
+ # backend modules
+-MODULES	  += iptables
+ 
+ # deployment modules
+ MODULES	  += syslog
+diff --git a/modules/vyatta/backend.c b/modules/vyatta/backend.c
+new file mode 100644
+index 0000000..cf347b1
+--- /dev/null
++++ b/modules/vyatta/backend.c
+@@ -0,0 +1,52 @@
++/**
++ * @file backend.c  Dummy PCP backend for vyatta dataplane
++ * The daemon requires a backend to be present, so we register a dummy one.
++ *
++ * Copyright (c) 2019, AT&T Intellectual Property. All rights reserved.
++ */
++#include <re.h>
++#include <repcpd.h>
++#include "vyatta.h"
++
++static int backend_new(const char *name)
++{
++	return 0;
++}
++
++static void backend_flush(const char *name)
++{
++}
++
++static int backend_append(const char *name, int proto,
++			  const struct sa *ext_addr,
++			  const char *ext_ifname,
++			  const struct sa *int_addr,
++			  const char *descr)
++{
++	return 0;
++}
++
++static void backend_delete(const char *name, int proto,
++			   const struct sa *ext_addr,
++			   const char *ext_ifname,
++			   const struct sa *int_addr,
++			   const char *descr)
++{
++}
++
++static struct backend be = {
++	.new = backend_new,
++	.flush = backend_flush,
++	.append = backend_append,
++	.delete = backend_delete,
++};
++
++void backend_close(void)
++{
++	backend_unregister(&be);
++}
++
++void backend_init(void)
++{
++	backend_register(&be);
++}
+diff --git a/modules/vyatta/dataplane.c b/modules/vyatta/dataplane.c
+new file mode 100644
+index 0000000..afdfe08
+--- /dev/null
++++ b/modules/vyatta/dataplane.c
+@@ -0,0 +1,296 @@
++/**
++ * @file dataplane.c  Program PCP requests to dataplane
++ *
++ * Copyright (c) 2019, AT&T Intellectual Property. All rights reserved.
++ */
++#include <czmq.h>
++#include <json-c/json.h>
++#include <re.h>
++#include <repcpd.h>
++#include <vplaned.h>
++#include "vyatta.h"
++
++#define ZMQ_TIMEOUT_MS 1000	/* Time to wait for vplaned/dataplane reply */
++
++/* ZMQ socket to program dataplane */
++static zsock_t *dataplane_sock;
++
++static bool dataplane_open(void)
++{
++	struct vplaned_dataplane *dp = NULL;
++	const char *url = NULL;
++	zsock_t *vplaned_sock;
++	bool ret = false;
++	int err;
++
++	if (dataplane_sock)
++		/* Already open */
++		return true;
++
++	vplaned_sock = vplaned_connect();
++	if (!vplaned_sock) {
++		error("vplaned: cannot connect\n");
++		return false;
++	}
++
++	err = vplaned_request_dataplane(vplaned_sock);
++	if (err < 0) {
++		error("vplaned: cannot request dataplane: %m\n", -err);
++		goto out;
++	}
++
++	err = vplaned_dp_get_first(vplaned_sock, ZMQ_TIMEOUT_MS, true, &dp);
++	if (err < 0 || !dp) {
++		error("vplaned: cannot read dataplane url: %m\n", -err);
++		goto out;
++	}
++
++	url = vplaned_dp_console(dp);
++	/* ZMQ will keep retrying if IPC file not accessible */
++	if ((strncmp(url, "ipc://", 6) == 0) &&
++	    (access(url + 6, W_OK|R_OK) < 0)) {
++		error("dataplane: cannot access url '%s': %m\n", url, errno);
++		goto out;
++	}
++
++	dataplane_sock = zsock_new(ZMQ_REQ);
++	if (!dataplane_sock) {
++		error("dataplane: cannot open socket: %m\n", errno);
++		goto out;
++	}
++
++	if (zsock_connect(dataplane_sock, url, NULL) < 0) {
++		error("dataplane: cannot connect to '%s': %m\n", url, errno);
++		goto out;
++	}
++
++	info("connected to dataplane '%s'\n", url);
++	ret = true;
++
++ out:
++	vplaned_dp_destroy(&dp);
++	vplaned_disconnect(&vplaned_sock);
++	if (!ret)
++		zsock_destroy(&dataplane_sock);
++	return ret;
++}
++
++static char *send_recv(const char *cmd)
++{
++	char *reply = NULL;
++	zmsg_t *resp;
++	zframe_t *fr;
++
++	if (zstr_send(dataplane_sock, cmd) < 0) {
++		error("dataplane: cannot send '%s': %m\n", cmd, errno);
++		return NULL;
++	}
++
++	/* Wait for and parse dataplane reply */
++	zsock_set_rcvtimeo(dataplane_sock, ZMQ_TIMEOUT_MS);
++	resp = zmsg_recv(dataplane_sock);
++	if (!resp) {
++		error("dataplane: timeout waiting for reply\n");
++		return NULL;
++	}
++
++	if (!zframe_streq(zmsg_first(resp), "OK")) {
++		error("dataplane: invalid reply\n");
++		goto out;
++	}
++
++	fr = zmsg_next(resp);
++	if (fr)
++		reply = zframe_strdup(fr);
++	if (!reply) {
++		error("dataplane: cannot extract reply\n");
++		goto out;
++	}
++
++ out:
++	zmsg_destroy(&resp);
++	return reply;
++}
++
++static bool parse_cgnat_map_reply(struct json_object *top_obj,
++				  const char **error, uint32_t *lifetime,
++				  const char **ifname, uint16_t *proto,
++				  const char **subs_addr, uint16_t *subs_port,
++				  const char **pub_addr, uint16_t *pub_port)
++{
++	struct json_object *map_obj;
++	struct json_object *obj;
++	int result;
++
++	if (!json_object_object_get_ex(top_obj, "map", &map_obj))
++		return false;
++
++	if (!json_object_object_get_ex(map_obj, "intf", &obj))
++		return false;
++	*ifname = json_object_get_string(obj);
++	if (!(*ifname))
++		return false;
++
++	if (!json_object_object_get_ex(map_obj, "proto", &obj))
++		return false;
++	errno = 0;
++	*proto = json_object_get_int(obj);
++	if (errno)
++		return false;
++
++	if (!json_object_object_get_ex(map_obj, "subs_addr", &obj))
++		return false;
++	*subs_addr = json_object_get_string(obj);
++	if (!(*subs_addr))
++		return false;
++
++	if (!json_object_object_get_ex(map_obj, "subs_port", &obj))
++		return false;
++	errno = 0;
++	*subs_port = json_object_get_int(obj);
++	if (errno)
++		return false;
++
++	if (!json_object_object_get_ex(map_obj, "pub_addr", &obj))
++		return false;
++	*pub_addr = json_object_get_string(obj);
++	if (!(*pub_addr))
++		return false;
++
++	if (!json_object_object_get_ex(map_obj, "pub_port", &obj))
++		return false;
++	errno = 0;
++	*pub_port = json_object_get_int(obj);
++	if (errno)
++		return false;
++
++	if (!json_object_object_get_ex(map_obj, "timeout", &obj))
++		return false;
++	errno = 0;
++	*lifetime = json_object_get_int64(obj);
++	if (errno)
++		return false;
++
++	if (!json_object_object_get_ex(map_obj, "result", &obj))
++		return false;
++	errno = 0;
++	result = json_object_get_int(obj);
++	if (errno)
++		return false;
++
++	*error = NULL;
++	if (result < 0) {
++		if (!json_object_object_get_ex(map_obj, "error", &obj))
++			return false;
++		*error = json_object_get_string(obj);
++		if (!(*error))
++			return false;
++	}
++
++	return true;
++}
++
++enum pcp_result dataplane_cgnat_map(const char *ifname, uint16_t proto,
++				    const struct sa *saddr, struct sa *paddr,
++				    uint32_t *lifetime, bool ext_match)
++{
++	enum pcp_result result = PCP_NO_RESOURCES;
++	struct json_object *top_obj = NULL;
++	char saddr_str[INET6_ADDRSTRLEN];
++	char paddr_str[INET6_ADDRSTRLEN];
++	const char *r_ifname;
++	const char *r_error;
++	const char *r_saddr;
++	const char *r_paddr;
++	uint32_t r_lifetime;
++	uint16_t r_proto;
++	uint16_t r_sport;
++	uint16_t r_pport;
++	char cmd[BUFSIZ];
++	bool dp_error;
++	char *reply;
++	int err;
++
++	sa_ntop(saddr, saddr_str, sizeof(saddr_str));
++	sa_ntop(paddr, paddr_str, sizeof(paddr_str));
++
++	/* Open connection to dataplane (if not already open) */
++	if (!dataplane_open())
++		return result;
++
++	/* Construct and send dataplane cgnat map request */
++	dp_error = true;
++	snprintf(cmd, sizeof(cmd),
++		 "cgn-op map intf %s timeout %u proto %u "
++		 "subs-addr %s subs-port %u pub-addr %s pub-port %u",
++		 ifname, *lifetime, proto, saddr_str, sa_port(saddr),
++		 paddr_str, sa_port(paddr));
++	debug("dataplane cgnat map request: %s\n", cmd);
++	reply = send_recv(cmd);
++	if (!reply)
++		goto out;
++	debug("dataplane cgnat map reply: %s\n", reply);
++
++	/* Parse dataplane reply */
++	top_obj = json_tokener_parse(reply);
++	if (!top_obj)
++		goto out;
++	if (!parse_cgnat_map_reply(top_obj, &r_error, &r_lifetime,
++				   &r_ifname, &r_proto, &r_saddr,
++				   &r_sport, &r_paddr, &r_pport)) {
++		error("dataplane: cannot parse cgnat map reply: %s\n", reply);
++		goto out;
++	}
++
++	/* Got something reasonable back */
++	dp_error = false;
++
++	/* Check the reply matches what we sent */
++	if (strcmp(ifname, r_ifname) || proto != r_proto ||
++	    strcmp(saddr_str, r_saddr) || sa_port(saddr) != r_sport) {
++		error("dataplane: cgnat map reply mismatch: %s -> %s\n",
++		      cmd, reply);
++		goto out;
++	}
++
++	/* TBD: check for specific error codes for mapping to PCP errors */
++	if (!r_error) {
++		/* Check if external matches suggested */
++		if (ext_match &&
++		    ((sa_port(paddr) != 0 && sa_port(paddr) != r_pport) ||
++		     (!sa_is_any(paddr) && strcmp(paddr_str, r_paddr) != 0))) {
++			result = PCP_CANNOT_PROVIDE_EXTERNAL;
++			goto out;
++		}
++
++		/* Fill in results */
++		err = sa_set_str(paddr, r_paddr, r_pport);
++		if (err < 0) {
++			error("dataplane: cannot set address %s-%u: %m",
++			       r_paddr, r_pport, err);
++			goto out;
++		}
++		*lifetime = r_lifetime;
++		result = PCP_SUCCESS;
++	}
++
++ out:
++	if (top_obj)
++		json_object_put(top_obj);
++	if (reply)
++		free(reply);
++	if (dp_error)
++		dataplane_close();
++	return result;
++}
++
++void dataplane_close(void)
++{
++	zsock_destroy(&dataplane_sock);
++}
++
++void dataplane_init(void)
++{
++	/* Ensure ZMQ does not take over SIGINT and SIGTERM */
++	zsys_handler_set(NULL);
++}
+diff --git a/modules/vyatta/module.mk b/modules/vyatta/module.mk
+new file mode 100644
+index 0000000..399118c
+--- /dev/null
++++ b/modules/vyatta/module.mk
+@@ -0,0 +1,11 @@
++#
++# module.mk
++#
++# Copyright (c) 2019, AT&T Intellectual Property. All rights reserved.
++#
++
++MOD		:= vyatta
++$(MOD)_SRCS	+= backend.c dataplane.c vyatta.c
++$(MOD)_LFLAGS	+= $(shell pkg-config --libs --static libvplaned)
++
++include mk/mod.mk
+diff --git a/modules/vyatta/vyatta.c b/modules/vyatta/vyatta.c
+new file mode 100644
+index 0000000..99de696
+--- /dev/null
++++ b/modules/vyatta/vyatta.c
+@@ -0,0 +1,522 @@
++/**
++ * @file vyatta.c  PCP module for vyatta dataplane
++ *
++ * Copyright (c) 2019, AT&T Intellectual Property. All rights reserved.
++ */
++#define _GNU_SOURCE
++#include <net/if.h>
++#include <stdlib.h>
++#include <string.h>
++#include <re.h>
++#include <repcpd.h>
++#include "vyatta.h"
++
++/* PCP configuration */
++struct pcp_config {
++	bool nonce_check;		/* validate the nonce */
++	bool from_client;		/* accept from clients */
++	bool from_tp;			/* accept from third party */
++	struct list tp_interfaces;	/* third-party interfaces */
++	struct list prefixes;		/* internal prefixes */
++};
++
++/* Third-party interface */
++struct tp_interface {
++	struct le le;			/* list element */
++	char interface[IFNAMSIZ];	/* interface name */
++};
++
++/* Internal prefix */
++struct prefix {
++	struct le le;			/* list element */
++	struct sa addr;			/* AF and address */
++	struct sa mask;			/* mask */
++	uint8_t len;			/* length */
++	char interface[IFNAMSIZ];	/* feature interface name */
++	bool announce;			/* accept announce requests */
++	bool map;			/* accept map requests */
++};
++
++
++/* Mapping table to check nonce */
++static struct mapping_table *table;
++
++/* Our PCP configuration */
++static struct pcp_config config;
++
++
++/* Configuration handlers */
++static void prefix_destructor(void *arg)
++{
++	struct prefix *p = arg;
++
++	list_unlink(&p->le);
++}
++
++static int prefix_handler(const struct pl *pl, void *arg)
++{
++	struct prefix *p;
++	char *str = NULL;
++	uint32_t mask;
++	struct le *le;
++	char *sep;
++	int len;
++	int err;
++	int i;
++
++	debug("prefix: %r\n", pl);
++
++	p = mem_zalloc(sizeof(*p), prefix_destructor);
++	if (!p)
++		return ENOMEM;
++
++	err = pl_strdup(&str, pl);
++	if (err)
++		goto out;
++
++	/* Prefix */
++	sep = strtok(str, "/");
++	if (!sep) {
++		err = EINVAL;
++		goto out;
++	}
++
++	err = sa_set_str(&p->addr, sep, 0);
++	if (err)
++		goto out;
++
++	/* Length */
++	sep = strtok(NULL, ",");
++	if (!sep) {
++		err = EINVAL;
++		goto out;
++	}
++
++	/* Only handle IPv4 at present */
++	len = atoi(sep);
++	if (len < 0 || len > 32 || sa_af(&p->addr) != AF_INET) {
++		err = EINVAL;
++		goto out;
++	}
++
++	/* Noddy loop to construct mask from length */
++	mask = 0;
++	for (i = 0; i < len; i++)
++		mask = (mask << 1) | 1;
++	mask <<= (32 - i);
++
++	sa_set_in(&p->mask, mask, 0);
++
++	/* Feature interface - required */
++	sep = strtok(NULL, ",");
++	if (!sep) {
++		err = EINVAL;
++		goto out;
++	}
++
++	snprintf(p->interface, sizeof(p->interface), "%s", sep);
++
++	/* opcode support - optional */
++	sep = strtok(NULL, ",");
++	while (sep) {
++		if (0 == strcmp(sep, "announce"))
++			p->announce = true;
++		else if (0 == strcmp(sep, "map"))
++			p->map = true;
++		sep = strtok(NULL, ",");
++	}
++
++	debug("internal prefix: %j/%j %s%s%s\n",
++	      &p->addr, &p->mask, p->interface,
++	      p->announce ? " announce" : "",
++	      p->map ? " map" : "");
++
++	/* Insert with longest prefix first */
++	for (le = list_head(&config.prefixes); le; le = le->next) {
++		struct prefix *p1 = le->data;
++
++		if (p->len <= p1->len)
++			break;
++	}
++	if (le)
++		list_insert_before(&config.prefixes, le, &p->le, p);
++	else
++		list_append(&config.prefixes, &p->le, p);
++	err = 0;
++
++out:
++	mem_deref(str);
++	if (err) {
++		error("cannot parse prefix %r: %m\n", pl, err);
++		mem_deref(p);
++	}
++	return err;
++}
++
++static void tp_destructor(void *arg)
++{
++	struct tp_interface *tp = arg;
++
++	list_unlink(&tp->le);
++}
++
++static int thirdparty_if_handler(const struct pl *pl, void *arg)
++{
++	struct tp_interface *tp;
++
++	debug("thirdparty: %r\n", pl);
++
++	tp = mem_zalloc(sizeof(*tp), tp_destructor);
++	if (!tp)
++		return ENOMEM;
++	pl_strcpy(pl, tp->interface, sizeof(tp->interface));
++	list_append(&config.tp_interfaces, &tp->le, tp);
++	return 0;
++}
++
++static int load_config(const struct conf *conf)
++{
++	int err;
++
++	config.nonce_check = true;
++	list_init(&config.tp_interfaces);
++	list_init(&config.prefixes);
++
++	err = conf_get_bool(conf, "nonce_check", &config.nonce_check);
++	if (err && ENOENT != err)
++		return err;
++
++	err = conf_apply(conf, "prefix", prefix_handler, 0);
++	if (err)
++		return err;
++
++	err = conf_get_bool(conf, "client", &config.from_client);
++	if (err && ENOENT != err)
++		return err;
++
++	err = conf_get_bool(conf, "thirdparty", &config.from_tp);
++	if (err && ENOENT != err)
++		return err;
++
++	err = conf_apply(conf, "thirdparty_interface", thirdparty_if_handler, 0);
++	if (err != ENOENT)
++		return err;
++
++	return 0;
++}
++
++static bool match_tp_interface(struct le *le, void *arg)
++{
++	struct tp_interface *tp = le->data;
++	const char *ifname = arg;
++
++	return (0 == strcmp(tp->interface, ifname));
++}
++
++static bool match_prefix(struct le *le, void *arg)
++{
++	struct prefix *p = le->data;
++	struct sa *iaddr = arg;
++	uint32_t prefix;
++	uint32_t addr;
++	uint32_t mask;
++
++	prefix = sa_in(&p->addr);
++	mask = sa_in(&p->mask);
++	addr = sa_in(iaddr);
++
++	return ((prefix & mask) == (addr & mask));
++}
++
++static bool announce_handler(struct udp_sock *us, const struct sa *src,
++			     struct mbuf *mb, struct pcp_msg *msg)
++{
++	struct prefix *pfx;
++	int err;
++
++	if (msg->hdr.opcode != PCP_ANNOUNCE)
++		return false;
++
++	/* Validate internal address against allowed */
++	pfx = NULL;
++	if (list_head(&config.prefixes)) {
++		struct le *le;
++
++		le = list_apply(&config.prefixes, true, match_prefix,
++		                /* discard const */(void *)src);
++		if (le)
++			pfx = le->data;
++	}
++	if (!pfx || !pfx->announce) {
++		debug("announce: unsupported client %J ignored\n", src);
++		return true;
++	}
++
++	if (msg->hdr.lifetime != 0) {
++		debug("announce: request from %J has non-zero lifetime\n", src);
++
++		pcp_ereply(us, src, mb, PCP_MALFORMED_REQUEST);
++		return true;
++	}
++
++	err = pcp_reply(us, src, mb, msg->hdr.opcode, PCP_SUCCESS,
++			0, repcpd_epoch_time(), NULL);
++	if (err)
++		error("announce: failed to reply to %J: %m\n", src, err);
++	else
++		debug("announce: replied to request from %J\n", src);
++
++	return true;
++}
++
++static bool map_handler(struct udp_sock *us, const struct sa *src,
++			struct mbuf *mb, struct pcp_msg *msg)
++{
++	enum pcp_result result = PCP_NO_RESOURCES;
++	struct pcp_map *map = &msg->pld.map;
++	struct in6_pktinfo *pktinfo6;
++	char ipstr[INET6_ADDRSTRLEN];
++	char in_ifname[IF_NAMESIZE];
++	struct in_pktinfo *pktinfo;
++	struct mapping *mapping;
++	struct pcp_option *opt;
++	struct prefix *pfx;
++	struct sa *iaddr;
++	bool ext_suggest;
++	bool pref_fail;
++	int err;
++
++	if (msg->hdr.opcode != PCP_MAP)
++		return false;
++
++	/* Note the input interface for third party check */
++	in_ifname[0] = '\0';
++	pktinfo = udp_get_recv_pktinfo(us, AF_INET);
++	if (pktinfo) {
++		(void)if_indextoname(pktinfo->ipi_ifindex, in_ifname);
++		debug("map: rxif %d(%s), dst %s, src %J\n",
++		       pktinfo->ipi_ifindex, in_ifname,
++		       inet_ntoa(pktinfo->ipi_addr), src);
++	}
++	pktinfo6 = udp_get_recv_pktinfo(us, AF_INET6);
++	if (pktinfo6) {
++		(void)if_indextoname(pktinfo6->ipi6_ifindex, in_ifname);
++		debug("map: rxif %d(%s), dst %s, src %J\n",
++		       pktinfo6->ipi6_ifindex, in_ifname,
++		       inet_ntop(AF_INET6, &pktinfo6->ipi6_addr, ipstr,
++				 sizeof(ipstr)),
++		       src);
++	}
++
++	if (!map->int_port) {
++		debug("map: wildcard/dmz not supported\n");
++		result = PCP_UNSUPP_PROTOCOL;
++		goto error;
++	}
++	else if (!map->proto) {
++		result = PCP_MALFORMED_REQUEST;
++		goto error;
++	}
++	else if (map->proto != IPPROTO_TCP && map->proto != IPPROTO_UDP &&
++		 map->proto != IPPROTO_UDPLITE && map->proto != IPPROTO_DCCP) {
++		result = PCP_UNSUPP_PROTOCOL;
++		goto error;
++	}
++
++	/* We don't support filters */
++	opt = pcp_msg_option(msg, PCP_OPTION_FILTER);
++	if (opt) {
++		if (msg->hdr.lifetime)
++			result = PCP_EXCESSIVE_REMOTE_PEERS;
++		else
++			result = PCP_MALFORMED_OPTION;
++		goto error;
++	}
++
++	/* Make sure lifetime is sane */
++	if (msg->hdr.lifetime)
++		msg->hdr.lifetime = pcp_lifetime_calculate(msg->hdr.lifetime);
++
++	opt = pcp_msg_option(msg, PCP_OPTION_THIRD_PARTY);
++	if (opt) {
++		if (!config.from_tp) {
++			debug("map: %J third party not allowed\n", src);
++			result = PCP_UNSUPP_OPTION;
++			goto error;
++		}
++
++		if (list_head(&config.tp_interfaces)) {
++			/* Validate input interface against allowed */
++			if (!list_apply(&config.tp_interfaces, true,
++					match_tp_interface, in_ifname)) {
++				debug("map: %J third party request on "
++				      "unexpected interface %s\n",
++				      src, in_ifname);
++				result = PCP_UNSUPP_OPTION;
++				goto error;
++			}
++		}
++
++		iaddr = &opt->u.third_party;
++	} else {
++		if (!config.from_client) {
++			debug("map: %J client request not allowed\n", src);
++			result = PCP_NOT_AUTHORIZED;
++			goto error;
++		}
++		iaddr = &msg->hdr.cli_addr;
++	}
++	sa_set_port(iaddr, map->int_port);
++
++	/* Validate internal address against allowed */
++	pfx = NULL;
++	if (list_head(&config.prefixes)) {
++		struct le *le;
++
++		le = list_apply(&config.prefixes, true, match_prefix, iaddr);
++		if (le)
++			pfx = le->data;
++	}
++	if (!pfx || !pfx->map) {
++		debug("map: %J unsupported internal address %J\n", src, iaddr);
++		result = PCP_NOT_AUTHORIZED;
++		goto error;
++	}
++
++	opt = pcp_msg_option(msg, PCP_OPTION_DESCRIPTION);
++	debug("map %s: %u(%s) src=%J int=%J ext=%J %u %s\n",
++		msg->hdr.lifetime ? "update" : "delete",
++		map->proto, pcp_proto_name(map->proto),
++		&msg->hdr.cli_addr, iaddr, &map->ext_addr,
++		msg->hdr.lifetime,
++		opt ? opt->u.description : "NULL");
++
++	mapping = mapping_find(table, map->proto, iaddr);
++	if (mapping) {
++		/* Simple Threat Model, verify nonce */
++		if (config.nonce_check &&
++		    !pcp_nonce_cmp(msg, mapping->map.nonce)) {
++			debug("map: %s(%u) %J NONCE mismatch\n",
++			      pcp_proto_name(map->proto), map->proto, iaddr);
++			result = PCP_NOT_AUTHORIZED;
++			goto error;
++		}
++	}
++
++	/* We require suggested external to match if prefer failure */
++	ext_suggest = (sa_port(&map->ext_addr) != 0 ||
++		       !sa_is_any(&map->ext_addr));
++	pref_fail = (pcp_msg_option(msg, PCP_OPTION_PREFER_FAILURE) != NULL);
++	result = dataplane_cgnat_map(pfx->interface, map->proto, iaddr,
++				     &map->ext_addr, &msg->hdr.lifetime,
++				     ext_suggest && pref_fail);
++	if (result != PCP_SUCCESS && ext_suggest) {
++		/* suggested external failed, reject or retry with wildcard */
++		if (pref_fail) {
++			result = PCP_CANNOT_PROVIDE_EXTERNAL;
++			goto error;
++		}
++		sa_set_str(&map->ext_addr, "0.0.0.0", 0);
++		result = dataplane_cgnat_map(pfx->interface, map->proto, iaddr,
++					     &map->ext_addr,
++					     &msg->hdr.lifetime, false);
++	}
++	if (result != PCP_SUCCESS)
++		goto error;
++
++	debug("map response: %u(%s) %J %J %u\n",
++		map->proto, pcp_proto_name(map->proto),
++		&msg->hdr.cli_addr, &map->ext_addr,
++		msg->hdr.lifetime);
++
++	if (msg->hdr.lifetime) {
++		if (mapping) {
++			mapping_refresh(mapping, msg->hdr.lifetime);
++		} else if (config.nonce_check) {
++			/* Store mappings so can check nonce on updates */
++			err = mapping_create(&mapping, table, PCP_MAP,
++					     map->proto, iaddr, pfx->interface,
++					     &map->ext_addr, NULL,
++					     msg->hdr.lifetime, map->nonce,
++					     opt ? opt->u.description : NULL);
++			if (err) {
++				warning("mapping create failed: %m\n", err);
++				/* continue anyway as dataplane has it */
++			}
++		}
++	} else {
++		mapping = mem_deref(mapping);
++	}
++
++	/* reply SUCCESS */
++	err = pcp_reply(us, src, mb, msg->hdr.opcode, PCP_SUCCESS,
++			msg->hdr.lifetime, repcpd_epoch_time(), map);
++	if (err) {
++		error("map: failed to send reply to %J: %m\n", src, err);
++		goto error;
++	}
++
++	return true;
++
++ error:
++	debug("map: replying error %s to %J\n", pcp_result_name(result), src);
++	pcp_ereply(us, src, mb, result);
++
++	return true;
++}
++
++
++static struct repcpd_pcp announce = {
++	.reqh = announce_handler,
++};
++
++static struct repcpd_pcp map = {
++	.reqh = map_handler,
++};
++
++
++static int module_close(void)
++{
++	debug("vyatta: module closing..\n");
++
++	dataplane_close();
++	repcpd_unregister_handler(&announce);
++	repcpd_unregister_handler(&map);
++	table = mem_deref(table);
++	backend_close();
++
++	return 0;
++}
++
++
++static int module_init(void)
++{
++	int err;
++
++	log_enable_stderr(false);
++	repcpd_register_handler(&announce);
++	repcpd_register_handler(&map);
++	backend_init();
++	dataplane_init();
++	err = mapping_table_alloc(&table, "REPCPD-MAP");
++	if (err)
++		goto out;
++	err = load_config(_conf());
++	if (err)
++		goto out;
++
++	debug("vyatta: module loaded\n");
++
++out:
++	if (err)
++		module_close();
++	return err;
++}
++
++
++const struct mod_export exports = {
++	.name  = "vyatta",
++	.type  = "pcp",
++	.init  = module_init,
++	.close = module_close,
++};
+diff --git a/modules/vyatta/vyatta.h b/modules/vyatta/vyatta.h
+new file mode 100644
+index 0000000..e4d30d3
+--- /dev/null
++++ b/modules/vyatta/vyatta.h
+@@ -0,0 +1,16 @@
++/**
++ * @file vyatta.h  PCP module for vyatta dataplane
++ *
++ * Copyright (c) 2019, AT&T Intellectual Property. All rights reserved.
++ */
++
++#include <re.h>
++
++void backend_close(void);
++void backend_init(void);
++
++void dataplane_close(void);
++void dataplane_init(void);
++enum pcp_result dataplane_cgnat_map(const char *ifname, uint16_t proto,
++                                    const struct sa *saddr, struct sa *paddr,
++				    uint32_t *lifetime, bool ext_match);

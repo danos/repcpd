@@ -1,0 +1,80 @@
+From: George Wilkie <george.wilkie@intl.att.com>
+Date: Wed, 10 Jul 2019 10:57:57 +0100
+Subject: Retry udp listen on failure
+
+Timing can mean pcp daemon gets started before interface addresses
+are applied and bind fails.
+Log a warning and retry periodically until bind succeeeds.
+---
+ src/udp.c | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/src/udp.c b/src/udp.c
+index c4c393c..d72a61e 100644
+--- a/src/udp.c
++++ b/src/udp.c
+@@ -9,10 +9,14 @@
+ #include "pcpd.h"
+ 
+ 
++#define UDP_RETRY_TIMEOUT	(60*1000)
++
++
+ struct udp_lstnr {
+ 	struct le le;
+ 	struct sa bnd_addr;
+ 	struct udp_sock *us;
++	struct tmr retry;
+ };
+ 
+ 
+@@ -31,11 +35,27 @@ static void destructor(void *arg)
+ {
+ 	struct udp_lstnr *ul = arg;
+ 
++	tmr_cancel(&ul->retry);
+ 	list_unlink(&ul->le);
+ 	mem_deref(ul->us);
+ }
+ 
+ 
++static void udp_retry(void *arg)
++{
++	struct udp_lstnr *ul = arg;
++	int err;
++
++	err = udp_listen(&ul->us, &ul->bnd_addr, udp_recv, ul);
++	if (err) {
++		debug("udp listen retry %J: %m\n", &ul->bnd_addr, err);
++		tmr_start(&ul->retry, UDP_RETRY_TIMEOUT, udp_retry, ul);
++	} else {
++		info("udp listen succeeded on retry: %J\n", &ul->bnd_addr);
++	}
++}
++
++
+ static int listen_handler(const struct pl *addrport, void *arg)
+ {
+ 	struct udp_lstnr *ul = NULL;
+@@ -48,10 +68,11 @@ static int listen_handler(const struct pl *addrport, void *arg)
+ 		goto out;
+ 	}
+ 
++	tmr_init(&ul->retry);
+ 	list_append(&lstnrl, &ul->le, ul);
+ 
+ 	err = sa_decode(&ul->bnd_addr, addrport->p, addrport->l);
+-	if (err || sa_is_any(&ul->bnd_addr) || !sa_port(&ul->bnd_addr)) {
++	if (err || !sa_port(&ul->bnd_addr)) {
+ 		warning("bad udp_listen directive: '%r'\n", addrport);
+ 		err = EINVAL;
+ 		goto out;
+@@ -60,6 +81,8 @@ static int listen_handler(const struct pl *addrport, void *arg)
+ 	err = udp_listen(&ul->us, &ul->bnd_addr, udp_recv, ul);
+ 	if (err) {
+ 		warning("udp listen %J: %m\n", &ul->bnd_addr, err);
++		tmr_start(&ul->retry, UDP_RETRY_TIMEOUT, udp_retry, ul);
++		err = 0;
+ 		goto out;
+ 	}
+ 

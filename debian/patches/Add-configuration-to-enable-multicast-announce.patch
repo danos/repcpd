@@ -1,0 +1,41 @@
+From: George Wilkie <george.wilkie@intl.att.com>
+Date: Thu, 1 Aug 2019 16:03:52 +0100
+Subject: Add configuration to enable multicast announce
+
+Since module may be loaded for unicast configuration,
+should not assume it is right to multicast as well.
+---
+ modules/announce/announce.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/modules/announce/announce.c b/modules/announce/announce.c
+index dc2f861..2057ca8 100644
+--- a/modules/announce/announce.c
++++ b/modules/announce/announce.c
+@@ -21,6 +21,7 @@ struct announce_apply {
+ 
+ 
+ static struct list announcel;
++static bool announce_mcast;
+ 
+ 
+ static void destructor(void *arg)
+@@ -128,6 +129,10 @@ static void lstnr_handler(struct sa *bnd_addr, struct udp_sock *us,
+ 	aa.us = us;
+ 	list_apply(&announcel, true, announce_apply, &aa);
+ 
++	/* multicast response */
++	if (!announce_mcast)
++		return;
++
+ 	switch (sa_af(bnd_addr)) {
+ 
+ 	case AF_INET:
+@@ -160,6 +165,7 @@ static int module_init(void)
+ {
+ 	repcpd_register_handler(&announce);
+ 
++	conf_get_bool(_conf(), "announce", &announce_mcast);
+ 	conf_apply(_conf(), "announce_unicast", announce_handler, 0);
+ 
+ 	debug("announce: module loaded\n");
