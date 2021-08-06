@@ -18,11 +18,9 @@ Remove build of existing modules which are not required.
  create mode 100644 modules/vyatta/vyatta.c
  create mode 100644 modules/vyatta/vyatta.h
 
-diff --git a/Makefile b/Makefile
-index 6b3bf59..9786d76 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -13,13 +13,9 @@ VERSION   := $(VER_MAJOR).$(VER_MINOR).$(VER_PATCH)
+@@ -13,13 +13,9 @@
  
  # PCP modules
  MODULES	  := announce
@@ -37,9 +35,6 @@ index 6b3bf59..9786d76 100644
  
  # deployment modules
  MODULES	  += syslog
-diff --git a/modules/vyatta/backend.c b/modules/vyatta/backend.c
-new file mode 100644
-index 0000000..cf347b1
 --- /dev/null
 +++ b/modules/vyatta/backend.c
 @@ -0,0 +1,52 @@
@@ -95,9 +90,6 @@ index 0000000..cf347b1
 +{
 +	backend_register(&be);
 +}
-diff --git a/modules/vyatta/dataplane.c b/modules/vyatta/dataplane.c
-new file mode 100644
-index 0000000..afdfe08
 --- /dev/null
 +++ b/modules/vyatta/dataplane.c
 @@ -0,0 +1,296 @@
@@ -397,9 +389,6 @@ index 0000000..afdfe08
 +	/* Ensure ZMQ does not take over SIGINT and SIGTERM */
 +	zsys_handler_set(NULL);
 +}
-diff --git a/modules/vyatta/module.mk b/modules/vyatta/module.mk
-new file mode 100644
-index 0000000..399118c
 --- /dev/null
 +++ b/modules/vyatta/module.mk
 @@ -0,0 +1,11 @@
@@ -411,12 +400,9 @@ index 0000000..399118c
 +
 +MOD		:= vyatta
 +$(MOD)_SRCS	+= backend.c dataplane.c vyatta.c
-+$(MOD)_LFLAGS	+= $(shell pkg-config --libs --static libvplaned)
++$(MOD)_LFLAGS	+= $(shell pkg-config --libs libvplaned)
 +
 +include mk/mod.mk
-diff --git a/modules/vyatta/vyatta.c b/modules/vyatta/vyatta.c
-new file mode 100644
-index 0000000..99de696
 --- /dev/null
 +++ b/modules/vyatta/vyatta.c
 @@ -0,0 +1,522 @@
@@ -942,9 +928,6 @@ index 0000000..99de696
 +	.init  = module_init,
 +	.close = module_close,
 +};
-diff --git a/modules/vyatta/vyatta.h b/modules/vyatta/vyatta.h
-new file mode 100644
-index 0000000..e4d30d3
 --- /dev/null
 +++ b/modules/vyatta/vyatta.h
 @@ -0,0 +1,16 @@
